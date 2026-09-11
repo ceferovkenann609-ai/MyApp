@@ -1,0 +1,39 @@
+﻿services:
+  postgres:
+    image: postgres:16
+    container_name: myapp-postgres
+    environment:
+      POSTGRES_DB: myapp_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: kenan444
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: myapp-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__DefaultConnection: "Host=postgres;Port=5432;Database=myapp_db;Username=postgres;Password=kenan444"
+      Jwt__Key: "SuperSecretKeyForJwtTokenGeneration12345!"
+      Jwt__Issuer: "MyApp.Api"
+      Jwt__Audience: "MyApp.Client"
+      Jwt__ExpiryMinutes: "60"
+    ports:
+      - "5174:8080"
+
+volumes:
+  postgres_data:
