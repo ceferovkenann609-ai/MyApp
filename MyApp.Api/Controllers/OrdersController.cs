@@ -18,15 +18,18 @@ public class OrdersController : ControllerBase
     private readonly AppDbContext _context;
     private readonly IValidator<CreateOrderDto> _createValidator;
     private readonly IValidator<UpdateOrderStatusDto> _statusValidator;
+    private readonly IValidator<ApplyCouponDto> _couponValidator;
 
     public OrdersController(
         AppDbContext context,
         IValidator<CreateOrderDto> createValidator,
-        IValidator<UpdateOrderStatusDto> statusValidator)
+        IValidator<UpdateOrderStatusDto> statusValidator,
+        IValidator<ApplyCouponDto> couponValidator)
     {
         _context = context;
         _createValidator = createValidator;
         _statusValidator = statusValidator;
+        _couponValidator = couponValidator;
     }
 
     private int CurrentUserId => int.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
@@ -130,6 +133,9 @@ public class OrdersController : ControllerBase
                 if (errorMessage != null) return;
 
                 order.TotalAmount = total;
+                order.DiscountAmount = 0;
+                order.FinalAmount = total;
+
                 order.StatusHistory.Add(new OrderStatusHistory
                 {
                     Status = OrderStatus.Pending,
@@ -162,6 +168,47 @@ public class OrdersController : ControllerBase
             .FirstAsync(o => o.Id == createdOrder.Id);
 
         return CreatedAtAction(nameof(GetById), new { id = full.Id }, MapToDto(full));
+    }
+
+    [HttpPost("{id}/apply-coupon")]
+    public async Task<ActionResult<OrderDto>> ApplyCoupon(int id, ApplyCouponDto dto)
+    {
+        await _couponValidator.ValidateAndThrowAsync(dto);
+
+        var order = await _context.Orders
+            .Include(o => o.User)
+            .Include(o => o.OrderItems).ThenInclude(oi => oi.Product)
+            .FirstOrDefaultAsync(o => o.Id == id);
+
+        if (order == null) return NotFound();
+
+        if (!IsAdmin && order.UserId != CurrentUserId)
+            return Forbid();
+
+        if (order.Status != OrderStatus.Pending)
+            return BadRequest("Yalnız 'Pending' statuslu sifarişlərə kupon tətbiq edilə bilər.");
+
+        var coupon = await _context.Coupons.FirstOrDefaultAsync(c => c.Code == dto.Code);
+        if (coupon == null)
+            return BadRequest("Kupon tapılmadı.");
+
+        var calcResult = CouponDiscountCalculator.Calculate(coupon, order.TotalAmount, DateTime.UtcNow);
+        if (!calcResult.IsValid)
+            return BadRequest(calcResult.ErrorMessage);
+
+        var rowsAffected = await _context.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE \"Coupons\" SET \"UsedCount\" = \"UsedCount\" + 1 WHERE \"Id\" = {coupon.Id} AND (\"MaxUsageCount\" IS NULL OR \"UsedCount\" < \"MaxUsageCount\")");
+
+        if (rowsAffected == 0)
+            return BadRequest("Kupon artıq istifadə limitini keçib.");
+
+        order.CouponCode = coupon.Code;
+        order.DiscountAmount = calcResult.DiscountAmount;
+        order.FinalAmount = order.TotalAmount - calcResult.DiscountAmount;
+
+        await _context.SaveChangesAsync();
+
+        return Ok(MapToDto(order));
     }
 
     [HttpPut("{id}/status")]
@@ -213,6 +260,9 @@ public class OrdersController : ControllerBase
             Id = o.Id,
             OrderDate = o.OrderDate,
             TotalAmount = o.TotalAmount,
+            CouponCode = o.CouponCode,
+            DiscountAmount = o.DiscountAmount,
+            FinalAmount = o.FinalAmount,
             Status = o.Status.ToString(),
             UserId = o.UserId,
             UserName = o.User.Name,
